@@ -2,20 +2,19 @@
 title Building DDolomitesWpaper (Maguamale Edition)
 echo ==============================================
 echo   DDolomitesWpaper Build Script
-echo   Developer: Maguamale
 echo   Icon: DDolomitesWpaper.ico
-echo   Logo resource: logo.png
+echo   Logo resource: logo.png (bundled via --add-data)
 echo ==============================================
 echo.
 
-REM Change working directory to script location
+REM Change to this script folder
 cd /d "%~dp0"
 
 REM Clean previous build
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 
-echo Installing required packages...
+echo Installing required packages (if missing)...
 pip install -U pyinstaller pystray pillow pywin32 requests tzdata
 
 echo.
@@ -33,14 +32,8 @@ pyinstaller --clean --onefile --noconsole ^
 
 echo.
 if exist dist\DDolomitesWpaper.exe (
-    echo Build completed successfully!
-    echo Output file:
-    echo     %~dp0dist\DDolomitesWpaper.exe
-    echo -----------------------------------------------------
-    echo If the icon does not update immediately:
-    echo   Run:  ie4uinit.exe -ClearIconCache
-    echo   Or restart Windows Explorer
-    echo -----------------------------------------------------
+    echo Build completed successfully.
+    echo Output: %~dp0dist\DDolomitesWpaper.exe
 ) else (
     echo Build failed. Please check the error log above.
 )
