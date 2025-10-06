@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import sys
 import time
@@ -15,9 +16,7 @@ from tkinter import ttk, messagebox
 import winreg as reg  # 修改壁纸样式用
 
 # ============================================================
-#   DDolomitesWpaper 通用动态壁纸抓取器
-#   作者：子豪定制版
-# ============================================================
+
 
 # Windows 壁纸常量
 SPI_SETDESKWALLPAPER = 20
@@ -35,12 +34,28 @@ LOG_FILE = APP_DIR / "daemon.log"
 CONFIG_FILE = APP_DIR / "config.txt"
 IMAGE_PATH = USER_DESKTOP / "ddolomites_latest.jpg"
 
-# Logo 搜索路径（优先用你给的绝对路径）
-LOGO_CANDIDATES = [
-    Path(r"C:\Users\zhengzh\PycharmProjects\typicalProject\logo.png"),
-    Path(sys.executable).parent / "logo.png" if getattr(sys, "frozen", False) else None,
-    APP_DIR / "logo.png",
-]
+# 资源定位：兼容 PyInstaller --onefile（sys._MEIPASS）
+def resource_path(rel_name: str) -> Path:
+    """
+    获取打包/开发两种模式下的资源绝对路径。
+    - 打包(--onefile)时，PyInstaller 会把 --add-data 解压到 sys._MEIPASS。
+    - 开发模式下，返回当前脚本目录下的相对路径。
+    """
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / rel_name
+    return Path(__file__).parent / rel_name
+
+# Logo 查找顺序：开发机绝对路径 → 打包资源(_MEIPASS) → EXE 同目录 → APP_DIR
+def pick_logo_path() -> Path | None:
+    candidates = [
+        resource_path("logo.png"),
+        (Path(sys.executable).parent / "logo.png") if getattr(sys, "frozen", False) else None,
+        APP_DIR / "logo.png",
+    ]
+    for p in candidates:
+        if p and p.exists():
+            return p
+    return None
 
 stop_event = threading.Event()
 status_lock = threading.Lock()
@@ -50,7 +65,7 @@ last_status = "Idle"
 DEFAULT_CONFIG = {
     "base_url": "https://www.megacam.at/webcam/6er-Sesselbahn/",
     "interval_min": "60",               # 默认 60 分钟
-    "wallpaper_style": "fill",          # fill / stretch / tile
+    "wallpaper_style": "stretch",          # fill / stretch / tile
 }
 
 def load_config():
@@ -96,14 +111,6 @@ def most_recent_full_hour_rome():
     now_r = rome_now()
     floored = now_r.replace(minute=0, second=0, microsecond=0)
     return floored - dt.timedelta(hours=1)
-
-def seconds_until_next_hour_at(minute=1):
-    """每小时罗马时间 01 分执行（备用接口，如需按小时对齐可使用）"""
-    now_r = rome_now()
-    next_hour = (now_r.replace(minute=0, second=0, microsecond=0)
-                 + dt.timedelta(hours=1))
-    target = next_hour.replace(minute=minute, second=0, microsecond=0)
-    return max(5, int((target - now_r).total_seconds()))
 
 # -------------------- 下载与壁纸 --------------------
 def build_url(rome_hour):
@@ -194,36 +201,85 @@ def worker_loop():
             time.sleep(1)
         run_once()
 
+# -------------------- GUI 窗口工具 --------------------
+def center_window(win: tk.Tk | tk.Toplevel, w: int, h: int):
+    """把窗口居中到屏幕"""
+    win.update_idletasks()
+    sw = win.winfo_screenwidth()
+    sh = win.winfo_screenheight()
+    x = int((sw - w) / 2)
+    y = int((sh - h) / 2)
+    win.geometry(f"{w}x{h}+{x}+{y}")
+
 # -------------------- GUI 窗口 --------------------
+def load_logo_pil(size=(64,64)):
+    p = pick_logo_path()
+    if p:
+        try:
+            img = Image.open(p).convert("RGBA")
+            if size:
+                img = img.resize(size, Image.LANCZOS)
+            return img
+        except Exception:
+            pass
+    # fallback 内置简易图标
+    size = size or (64,64)
+    img = Image.new("RGBA", size, (32, 32, 36, 255))
+    d = ImageDraw.Draw(img)
+    d.polygon([(8,48),(24,28),(36,44),(48,24),(56,48)], fill=(200,200,210,255))
+    d.ellipse((14,12,30,28), fill=(220,220,230,255))
+    d.rectangle((0,0,size[0]-1,size[1]-1), outline=(90,90,98,255))
+    return img
+
+def load_logo_for_tk():
+    pil = load_logo_pil(size=(64,64))
+    return ImageTk.PhotoImage(pil) if pil else None
+
 def open_url_window():
-    def save():
-        new_url = url_var.get().strip()
-        if new_url:
-            config["base_url"] = new_url
-            save_config(config)
-            log(f"Base URL changed to: {new_url}", also_status=True)
-            messagebox.showinfo("Success", "URL updated successfully! Will fetch now.")
-            # 立即运行一次以使用新 URL
-            threading.Thread(target=run_once, daemon=True).start()
-            root.destroy()
-        else:
-            messagebox.showwarning("Invalid", "URL cannot be empty.")
     root = tk.Tk()
     root.title("Change Base URL - DDolomitesWpaper")
-    root.geometry("520x170")
+    center_window(root, 520, 170)
     try:
         logo_img = load_logo_for_tk()
         if logo_img:
             root.iconphoto(False, logo_img)
     except Exception:
         pass
+
     ttk.Label(root, text="Enter new base URL:").pack(pady=8)
     url_var = tk.StringVar(value=config["base_url"])
     ttk.Entry(root, textvariable=url_var, width=70).pack(pady=5)
+
+    def save():
+        new_url = url_var.get().strip()
+        if new_url:
+            config["base_url"] = new_url
+            save_config(config)
+            log(f"Base URL changed to: {new_url}", also_status=True)
+            messagebox.showinfo("Success", "URL updated. Fetching now.")
+            threading.Thread(target=run_once, daemon=True).start()
+            root.destroy()
+        else:
+            messagebox.showwarning("Invalid", "URL cannot be empty.")
     ttk.Button(root, text="Save", command=save).pack(pady=10)
     root.mainloop()
 
 def open_interval_window():
+    root = tk.Tk()
+    root.title("Set Interval - DDolomitesWpaper")
+    center_window(root, 320, 170)
+    try:
+        logo_img = load_logo_for_tk()
+        if logo_img:
+            root.iconphoto(False, logo_img)
+    except Exception:
+        pass
+
+    ttk.Label(root, text="Select update interval (minutes):").pack(pady=8)
+    combo_var = tk.StringVar(value=config["interval_min"])
+    combo = ttk.Combobox(root, textvariable=combo_var, values=["10", "30", "60"], width=10, state="readonly")
+    combo.pack(pady=5)
+
     def save_interval():
         sel = combo_var.get()
         if sel:
@@ -232,26 +288,13 @@ def open_interval_window():
             log(f"Interval changed to {sel} minutes", also_status=True)
             messagebox.showinfo("Success", f"Interval set to {sel} minutes")
             root.destroy()
-    root = tk.Tk()
-    root.title("Set Interval - DDolomitesWpaper")
-    root.geometry("320x170")
-    try:
-        logo_img = load_logo_for_tk()
-        if logo_img:
-            root.iconphoto(False, logo_img)
-    except Exception:
-        pass
-    ttk.Label(root, text="Select update interval (minutes):").pack(pady=8)
-    combo_var = tk.StringVar(value=config["interval_min"])
-    combo = ttk.Combobox(root, textvariable=combo_var, values=["10", "30", "60"], width=10, state="readonly")
-    combo.pack(pady=5)
     ttk.Button(root, text="Save", command=save_interval).pack(pady=10)
     root.mainloop()
 
 def open_about_window():
     root = tk.Tk()
     root.title("About - DDolomitesWpaper")
-    root.geometry("420x300")
+    center_window(root, 420, 320)
     try:
         logo_img = load_logo_for_tk()
         if logo_img:
@@ -267,7 +310,7 @@ def open_about_window():
     if pil_logo:
         tk_logo = ImageTk.PhotoImage(pil_logo)
         lbl_logo = ttk.Label(frm, image=tk_logo)
-        lbl_logo.image = tk_logo  # 防止被 GC
+        lbl_logo.image = tk_logo  # 防 GC
         lbl_logo.pack(pady=(0,8))
 
     ttk.Label(frm, text="DDolomitesWpaper", font=("Segoe UI", 14, "bold")).pack(pady=2)
@@ -279,45 +322,28 @@ def open_about_window():
     mail_lbl.pack()
     mail_lbl.bind("<Button-1>", lambda e: webbrowser.open("mailto:zhengzh@email.com"))
 
-    gh_lbl = ttk.Label(frm, text="GitHub: www.github.com/maguamale", foreground="#0066cc", cursor="hand2")
+    gh_lbl = ttk.Label(frm, text="GitHub: www.github.com/zhengzihao", foreground="#0066cc", cursor="hand2")
     gh_lbl.pack()
-    gh_lbl.bind("<Button-1>", lambda e: webbrowser.open("https://www.github.com/maguamale"))
+    gh_lbl.bind("<Button-1>", lambda e: webbrowser.open("https://www.github.com/zhengzihao"))
 
     ttk.Separator(frm).pack(fill="x", pady=10)
     ttk.Button(frm, text="Close", command=root.destroy).pack(pady=4)
     root.mainloop()
 
-# -------------------- 托盘图标与资源 --------------------
-def pick_logo_path():
-    for p in LOGO_CANDIDATES:
-        if p and p.exists():
-            return p
-    return None
+# -------------------- 托盘菜单 --------------------
+def is_style(style):
+    return lambda item: config.get("wallpaper_style", "fill").lower() == style
 
-def load_logo_pil(size=(64,64)):
-    p = pick_logo_path()
-    if p:
-        try:
-            img = Image.open(p).convert("RGBA")
-            if size:
-                img = img.resize(size, Image.LANCZOS)
-            return img
-        except Exception:
-            pass
-    # 兜底内置图标
-    size = size or (64,64)
-    img = Image.new("RGBA", size, (32, 32, 36, 255))
-    d = ImageDraw.Draw(img)
-    d.polygon([(8,48),(24,28),(36,44),(48,24),(56,48)], fill=(200,200,210,255))
-    d.ellipse((14,12,30,28), fill=(220,220,230,255))
-    d.rectangle((0,0,size[0]-1,size[1]-1), outline=(90,90,98,255))
-    return img
+def set_style(style):
+    config["wallpaper_style"] = style
+    save_config(config)
+    apply_wallpaper_style(style)
+    ctypes.windll.user32.SystemParametersInfoW(
+        SPI_SETDESKWALLPAPER, 0, str(IMAGE_PATH),
+        SPIF_UPDATEINIFILE | SPIF_SENDWININICHANGE
+    )
+    log(f"Wallpaper style set to: {style}", also_status=True)
 
-def load_logo_for_tk():
-    pil = load_logo_pil(size=(64,64))
-    return ImageTk.PhotoImage(pil) if pil else None
-
-# -------------------- 菜单动作 --------------------
 def action_run_now(icon, item):
     threading.Thread(target=run_once, daemon=True).start()
 
@@ -330,45 +356,29 @@ def action_open_image(icon, item):
     else:
         log("No image yet.")
 
-def set_style(style):
-    config["wallpaper_style"] = style
-    save_config(config)
-    # 立即应用到当前壁纸（即便不更换图片）
-    apply_wallpaper_style(style)
-    ctypes.windll.user32.SystemParametersInfoW(
-        SPI_SETDESKWALLPAPER, 0, str(IMAGE_PATH),
-        SPIF_UPDATEINIFILE | SPIF_SENDWININICHANGE
-    )
-    log(f"Wallpaper style set to: {style}", also_status=True)
-
-def is_style(style):
-    return lambda item: config.get("wallpaper_style", "fill").lower() == style
-
 def action_exit(icon, item):
     stop_event.set()
     icon.visible = False
     icon.stop()
 
-# -------------------- 主程序入口 --------------------
 def main():
     t = threading.Thread(target=worker_loop, daemon=True)
     t.start()
 
     image = load_logo_pil(size=(64,64))
-    # 壁纸样式子菜单
     style_menu = pystray.Menu(
-        pystray.MenuItem("Fill (填充)", lambda icon, item: set_style("fill"), checked=is_style("fill")),
-        pystray.MenuItem("Stretch (拉伸)", lambda icon, item: set_style("stretch"), checked=is_style("stretch")),
-        pystray.MenuItem("Tile (平铺)", lambda icon, item: set_style("tile"), checked=is_style("tile")),
+        pystray.MenuItem("Fill (填充)",   lambda icon, item: set_style("fill"),    checked=is_style("fill")),
+        pystray.MenuItem("Stretch (拉伸)",lambda icon, item: set_style("stretch"), checked=is_style("stretch")),
+        pystray.MenuItem("Tile (平铺)",   lambda icon, item: set_style("tile"),    checked=is_style("tile")),
     )
 
     menu = pystray.Menu(
         pystray.MenuItem(lambda item: f"Status: {get_status()}", None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Run now", action_run_now),
-        pystray.MenuItem("Open log folder", action_open_log),
         pystray.MenuItem("Open latest image", action_open_image),
-        pystray.MenuItem("Change URL", lambda icon, item: threading.Thread(target=open_url_window, daemon=True).start()),
+        pystray.MenuItem("Open log folder", action_open_log),
+        pystray.MenuItem("Change URL", lambda icon, item: threading.Thread(target=open_url_window,     daemon=True).start()),
         pystray.MenuItem("Set interval", lambda icon, item: threading.Thread(target=open_interval_window, daemon=True).start()),
         pystray.MenuItem("Wallpaper style", style_menu),
         pystray.Menu.SEPARATOR,
