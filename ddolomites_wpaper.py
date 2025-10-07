@@ -16,7 +16,56 @@ from tkinter import ttk, messagebox
 import winreg as reg  # 修改壁纸样式用
 
 # ============================================================
+#   DDolomitesWpaper 通用动态壁纸抓取器
+#   Developer: Maguamale
+# ============================================================
+# ---------- Startup (Run key) ----------
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+APP_NAME = "DDolomitesWpaper"
 
+def _current_executable_path() -> str:
+    """
+    返回写入 HKCU\\...\\Run 的命令行：
+    - 打包(onefile)时：   "path\\to\\app.exe"
+    - 开发模式(.py)时：   "path\\to\\python.exe" "path\\to\\script.py"
+    """
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}"'
+    else:
+        python = sys.executable
+        script = os.path.abspath(sys.argv[0])
+        return f'"{python}" "{script}"'
+
+
+def enable_startup(enable: bool) -> bool:
+    """开/关开机自启（写 HKCU\\...\\Run），返回是否成功"""
+    try:
+        key = reg.OpenKey(reg.HKEY_CURRENT_USER, RUN_KEY, 0, reg.KEY_SET_VALUE)
+        if enable:
+            reg.SetValueEx(key, APP_NAME, 0, reg.REG_SZ, _current_executable_path())
+        else:
+            try:
+                reg.DeleteValue(key, APP_NAME)
+            except FileNotFoundError:
+                pass
+        reg.CloseKey(key)
+        log(f"Startup set to {enable}", also_status=True)
+        return True
+    except Exception as e:
+        log(f"Startup toggle error: {e}", also_status=True)
+        return False
+
+def is_startup_enabled() -> bool:
+    """检测是否已开启开机自启"""
+    try:
+        key = reg.OpenKey(reg.HKEY_CURRENT_USER, RUN_KEY, 0, reg.KEY_READ)
+        val, _ = reg.QueryValueEx(key, APP_NAME)
+        reg.CloseKey(key)
+        return isinstance(val, str) and len(val) > 0
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
 
 # Windows 壁纸常量
 SPI_SETDESKWALLPAPER = 20
@@ -107,35 +156,64 @@ def get_status():
 def rome_now():
     return dt.datetime.now(dt.timezone.utc).astimezone(ROME_TZ)
 
-def most_recent_full_hour_rome():
+def most_recent_slot_rome(interval_min: int) -> dt.datetime:
+    """
+    返回罗马时区“上一个整 interval_min 分钟”的时间戳（严格取上一槽）。
+    例如：interval=10，当前 09:07 -> 09:00；当前正好 09:00 -> 08:50。
+          interval=30，当前 09:05 -> 09:00；当前正好 09:30 -> 09:00。
+          interval=60，当前 09:58 -> 09:00；当前正好 10:00 -> 09:00。
+    """
     now_r = rome_now()
-    floored = now_r.replace(minute=0, second=0, microsecond=0)
-    return floored - dt.timedelta(hours=1)
+    # 为了在“恰好卡到边界”时取上一档，这里先往回退 1 秒再做 floor
+    ref = now_r - dt.timedelta(seconds=1)
+    minute_bucket = (ref.minute // interval_min) * interval_min
+    floored = ref.replace(minute=minute_bucket, second=0, microsecond=0)
+    return floored
+
 
 # -------------------- 下载与壁纸 --------------------
-def build_url(rome_hour):
+def build_url(slot_dt: dt.datetime):
     base = config["base_url"].rstrip("/") + "/"
-    return f"{base}{rome_hour.year}/{rome_hour.month:02d}/{rome_hour.day:02d}/{rome_hour.hour:02d}00_hu.jpg"
+    return (
+        f"{base}{slot_dt.year}/{slot_dt.month:02d}/{slot_dt.day:02d}/"
+        f"{slot_dt.hour:02d}{slot_dt.minute:02d}_hu.jpg"
+    )
+
 
 def download_image_to_desktop():
-    rh = most_recent_full_hour_rome()
-    url = build_url(rh)
-    set_status("Fetching image...")
-    log(f"Fetching: {url}")
-
+    # 读取当前间隔；非法则视为 60
     try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
-        if r.status_code == 200 and r.content:
-            with open(IMAGE_PATH, "wb") as f:
-                f.write(r.content)
-            log(f"Saved to: {IMAGE_PATH}")
-            return IMAGE_PATH
-        else:
-            log(f"HTTP {r.status_code} or empty content.")
-            return None
-    except Exception as e:
-        log(f"Download error: {e}")
-        return None
+        interval = int(config.get("interval_min", "60"))
+        if interval not in (10, 30, 60):
+            interval = 60
+    except ValueError:
+        interval = 60
+
+    # 从“上一个整 interval 分钟”的槽位开始尝试，最多回退 6 档
+    set_status("Fetching image...")
+    start_slot = most_recent_slot_rome(interval)
+
+    for back in range(0, 6 + 1):
+        slot = start_slot - dt.timedelta(minutes=interval * back)
+        url = build_url(slot)
+        log(f"Fetching: {url}")
+        try:
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+            ctype = r.headers.get("Content-Type", "")
+            if r.status_code == 200 and r.content and "image" in ctype.lower():
+                tmp = IMAGE_PATH.with_suffix(".part")
+                with open(tmp, "wb") as f:
+                    f.write(r.content)
+                tmp.replace(IMAGE_PATH)
+                log(f"Saved to: {IMAGE_PATH}")
+                return IMAGE_PATH
+            else:
+                log(f"Missed slot {slot.strftime('%Y-%m-%d %H:%M')} — HTTP {r.status_code}, ctype={ctype}")
+        except Exception as e:
+            log(f"Download error on {url}: {e}")
+
+    return None
+
 
 def apply_wallpaper_style(style: str):
     """
@@ -347,6 +425,17 @@ def set_style(style):
 def action_run_now(icon, item):
     threading.Thread(target=run_once, daemon=True).start()
 
+def action_toggle_startup(icon, item):
+    # 取当前状态，切换之
+    cur = is_startup_enabled()
+    ok = enable_startup(not cur)
+    if ok:
+        # 切换后刷新菜单勾选状态
+        try:
+            icon.update_menu()
+        except Exception:
+            pass
+
 def action_open_log(icon, item):
     os.startfile(str(APP_DIR))
 
@@ -367,20 +456,27 @@ def main():
 
     image = load_logo_pil(size=(64,64))
     style_menu = pystray.Menu(
-        pystray.MenuItem("Fill (填充)",   lambda icon, item: set_style("fill"),    checked=is_style("fill")),
-        pystray.MenuItem("Stretch (拉伸)",lambda icon, item: set_style("stretch"), checked=is_style("stretch")),
-        pystray.MenuItem("Tile (平铺)",   lambda icon, item: set_style("tile"),    checked=is_style("tile")),
+        pystray.MenuItem("Fill",   lambda icon, item: set_style("fill"),    checked=is_style("fill")),
+        pystray.MenuItem("Stretch",lambda icon, item: set_style("stretch"), checked=is_style("stretch")),
+        pystray.MenuItem("Tile",   lambda icon, item: set_style("tile"),    checked=is_style("tile")),
     )
-
+    # 关键：开机自启菜单项（checked 动态显示当前状态）
+    startup_item = pystray.MenuItem(
+        "Auto Startup",
+        action_toggle_startup,
+        checked=lambda item: is_startup_enabled()
+    )
     menu = pystray.Menu(
         pystray.MenuItem(lambda item: f"Status: {get_status()}", None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Run now", action_run_now),
         pystray.MenuItem("Open latest image", action_open_image),
         pystray.MenuItem("Open log folder", action_open_log),
+        startup_item,
         pystray.MenuItem("Change URL", lambda icon, item: threading.Thread(target=open_url_window,     daemon=True).start()),
         pystray.MenuItem("Set interval", lambda icon, item: threading.Thread(target=open_interval_window, daemon=True).start()),
         pystray.MenuItem("Wallpaper style", style_menu),
+
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("About", lambda icon, item: threading.Thread(target=open_about_window, daemon=True).start()),
         pystray.MenuItem("Exit", action_exit),
